@@ -3,6 +3,7 @@ package httpSwagger
 import (
 	"bytes"
 	"html/template"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,39 +40,74 @@ func (s *mockedSwag) ReadDoc() string {
 }
 
 func TestWrapHandler(t *testing.T) {
-	router := http.NewServeMux()
 
-	router.Handle("/", Handler(DocExpansion("none"), DomID("#swagger-ui")))
+	tests := []struct {
+		RootFolder   string
+		InstanceName string
+	}{
+		{
+			RootFolder:   "/",
+			InstanceName: "default",
+		},
 
-	w1 := performRequest("GET", "/index.html", router)
-	assert.Equal(t, 200, w1.Code)
-	assert.Equal(t, w1.Header()["Content-Type"][0], "text/html; charset=utf-8")
+		{
+			RootFolder:   "/swagger/",
+			InstanceName: "swagger",
+		},
+		{
+			RootFolder:   "/custom/",
+			InstanceName: "custom",
+		},
+	}
+	for _, test := range tests {
+		router := http.NewServeMux()
+		router.Handle(test.RootFolder, Handler(
+			DocExpansion("none"),
+			DomID("swagger-ui"),
+			InstanceName(test.InstanceName),
+		))
 
-	w2 := performRequest("GET", "/doc.json", router)
-	assert.Equal(t, 500, w2.Code)
+		w1 := performRequest(http.MethodGet, test.RootFolder+"index.html", router)
+		assert.Equal(t, http.StatusOK, w1.Code)
+		assert.Equal(t, w1.Header()["Content-Type"][0], "text/html; charset=utf-8")
 
-	swag.Register(swag.Name, &mockedSwag{})
-	w2 = performRequest("GET", "/doc.json", router)
-	assert.Equal(t, 200, w2.Code)
-	assert.Equal(t, "application/json; charset=utf-8", w2.Header().Get("content-type"))
+		assert.Equal(t, http.StatusInternalServerError, performRequest(http.MethodGet, test.RootFolder+"doc.json", router).Code)
 
-	w3 := performRequest("GET", "/favicon-16x16.png", router)
-	assert.Equal(t, 200, w3.Code)
-	assert.Equal(t, w3.Header()["Content-Type"][0], "image/png")
+		doc := &mockedSwag{}
+		swag.Register(test.InstanceName, doc)
+		w2 := performRequest(http.MethodGet, test.RootFolder+"doc.json", router)
+		assert.Equal(t, http.StatusOK, w2.Code)
+		assert.Equal(t, "application/json; charset=utf-8", w2.Header().Get("content-type"))
 
-	w4 := performRequest("GET", "/swagger-ui.css", router)
-	assert.Equal(t, 200, w4.Code)
-	assert.Equal(t, w4.Header()["Content-Type"][0], "text/css; charset=utf-8")
+		// Perform body rendering validation
+		w2Body, err := io.ReadAll(w2.Body)
+		assert.NoError(t, err)
+		assert.Equal(t, doc.ReadDoc(), string(w2Body))
 
-	w5 := performRequest("GET", "/swagger-ui-bundle.js", router)
-	assert.Equal(t, 200, w5.Code)
-	assert.Equal(t, w5.Header()["Content-Type"][0], "application/javascript")
+		w3 := performRequest(http.MethodGet, test.RootFolder+"favicon-16x16.png", router)
+		assert.Equal(t, http.StatusOK, w3.Code)
+		assert.Equal(t, w3.Header()["Content-Type"][0], "image/png")
 
-	w6 := performRequest("GET", "/notfound", router)
-	assert.Equal(t, 404, w6.Code)
+		w4 := performRequest(http.MethodGet, test.RootFolder+"swagger-ui.css", router)
+		assert.Equal(t, http.StatusOK, w4.Code)
+		assert.Equal(t, w4.Header()["Content-Type"][0], "text/css; charset=utf-8")
 
-	w7 := performRequest("GET", "/", router)
-	assert.Equal(t, 301, w7.Code)
+		w5 := performRequest(http.MethodGet, test.RootFolder+"swagger-ui-bundle.js", router)
+		assert.Equal(t, http.StatusOK, w5.Code)
+		assert.Equal(t, w5.Header()["Content-Type"][0], "application/javascript")
+
+		w6 := performRequest(http.MethodGet, test.RootFolder+"oauth2-redirect.html?state=0&session_state=1&code=2", router)
+		assert.Equal(t, http.StatusOK, w6.Code)
+		assert.Equal(t, w6.Header()["Content-Type"][0], "text/html; charset=utf-8")
+
+		assert.Equal(t, http.StatusNotFound, performRequest(http.MethodGet, test.RootFolder+"notfound", router).Code)
+
+		assert.Equal(t, 301, performRequest(http.MethodGet, test.RootFolder, router).Code)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, performRequest(http.MethodPost, test.RootFolder+"index.html", router).Code)
+
+		assert.Equal(t, http.StatusMethodNotAllowed, performRequest(http.MethodPut, test.RootFolder+"index.html", router).Code)
+	}
 }
 
 func performRequest(method, target string, h http.Handler) *httptest.ResponseRecorder {
@@ -84,35 +120,82 @@ func performRequest(method, target string, h http.Handler) *httptest.ResponseRec
 }
 
 func TestURL(t *testing.T) {
+	var cfg *Config
+
 	expected := "https://github.com/swaggo/http-swagger"
-	cfg := Config{}
-	configFunc := URL(expected)
-	configFunc(&cfg)
+	cfg = newConfig(URL(expected))
 	assert.Equal(t, expected, cfg.URL)
 }
 
 func TestDeepLinking(t *testing.T) {
-	expected := true
-	cfg := Config{}
-	configFunc := DeepLinking(expected)
-	configFunc(&cfg)
-	assert.Equal(t, expected, cfg.DeepLinking)
+	var cfg Config
+	// Default value
+	assert.Equal(t, false, cfg.DeepLinking)
+
+	// Set true
+	DeepLinking(true)(&cfg)
+	assert.Equal(t, true, cfg.DeepLinking)
+
+	// Set false
+	DeepLinking(false)(&cfg)
+	assert.Equal(t, false, cfg.DeepLinking)
+}
+
+func TestLayout(t *testing.T) {
+	var cfg *Config
+
+	cfg = newConfig()
+	assert.Equal(t, StandaloneLayout, cfg.Layout)
+
+	cfg = newConfig(Layout(BaseLayout))
+	assert.Equal(t, BaseLayout, cfg.Layout)
 }
 
 func TestDocExpansion(t *testing.T) {
+	var cfg *Config
+
 	expected := "https://github.com/swaggo/docs"
-	cfg := Config{}
-	configFunc := DocExpansion(expected)
-	configFunc(&cfg)
+	cfg = newConfig(DocExpansion(expected))
 	assert.Equal(t, expected, cfg.DocExpansion)
 }
 
 func TestDomID(t *testing.T) {
-	expected := "#swagger-ui"
-	cfg := Config{}
-	configFunc := DomID(expected)
-	configFunc(&cfg)
+	var cfg *Config
+
+	expected := "swagger-ui"
+	cfg = newConfig(DomID(expected))
 	assert.Equal(t, expected, cfg.DomID)
+}
+
+func TestInstanceName(t *testing.T) {
+	var cfg *Config
+
+	expected := swag.Name
+	cfg = newConfig(InstanceName(expected))
+	assert.Equal(t, expected, cfg.InstanceName)
+
+	expected = "custom_name"
+	cfg = newConfig(InstanceName(expected))
+	assert.Equal(t, expected, cfg.InstanceName)
+
+	cfg = newConfig(InstanceName(""))
+	assert.Equal(t, swag.Name, cfg.InstanceName)
+}
+
+func TestPersistAuthorization(t *testing.T) {
+	var cfg *Config
+
+	// Default value
+	cfg = newConfig()
+	assert.Equal(t, false, cfg.PersistAuthorization)
+
+	// Set true
+	cfg = newConfig(PersistAuthorization(true))
+	assert.Equal(t, true, cfg.PersistAuthorization)
+
+	// Set false
+	cfg = newConfig(PersistAuthorization(false))
+	assert.Equal(t, false, cfg.PersistAuthorization)
 }
 
 func TestConfigURL(t *testing.T) {
@@ -223,7 +306,6 @@ func TestUIConfigOptions(t *testing.T) {
 <head>
   <meta charset="UTF-8">
   <title>Swagger UI</title>
-  <link href="https://fonts.googleapis.com/css?family=Open+Sans:400,700|Source+Code+Pro:300,600|Titillium+Web:400,600,700" rel="stylesheet">
   <link rel="stylesheet" type="text/css" href="./swagger-ui.css" >
   <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
   <link rel="icon" type="image/png" href="./favicon-16x16.png" sizes="16x16" />
@@ -299,10 +381,14 @@ func TestUIConfigOptions(t *testing.T) {
 		{
 			desc: "default configuration",
 			cfg: &Config{
-				URL:          "doc.json",
-				DeepLinking:  true,
-				DocExpansion: "list",
-				DomID:        "#swagger-ui",
+				URL:                      "doc.json",
+				DeepLinking:              true,
+				DocExpansion:             "list",
+				DomID:                    "swagger-ui",
+				PersistAuthorization:     false,
+				Layout:                   StandaloneLayout,
+				DefaultModelsExpandDepth: ShowModel,
+				ShowExtensions:           false,
 			},
 			exp: `window.onload = function() {
   
@@ -311,6 +397,7 @@ func TestUIConfigOptions(t *testing.T) {
     deepLinking:  true ,
     docExpansion: "list",
     dom_id: "#swagger-ui",
+    persistAuthorization:  false ,
     validatorUrl: null,
     presets: [
       SwaggerUIBundle.presets.apis,
@@ -319,7 +406,9 @@ func TestUIConfigOptions(t *testing.T) {
     plugins: [
       SwaggerUIBundle.plugins.DownloadUrl
     ],
-    layout: "StandaloneLayout"
+    layout: "StandaloneLayout",
+    defaultModelsExpandDepth:  1 ,
+    showExtensions:  false 
   })
 
   window.ui = ui
@@ -328,10 +417,12 @@ func TestUIConfigOptions(t *testing.T) {
 		{
 			desc: "script configuration",
 			cfg: &Config{
-				URL:          "swagger.json",
-				DeepLinking:  false,
-				DocExpansion: "none",
-				DomID:        "#swagger-ui-id",
+				URL:                  "swagger.json",
+				DeepLinking:          false,
+				PersistAuthorization: true,
+				DocExpansion:         "none",
+				DomID:                "swagger-ui-id",
+				Layout:               StandaloneLayout,
 				BeforeScript: `const SomePlugin = (system) => ({
     // Some plugin
   });
@@ -349,6 +440,8 @@ func TestUIConfigOptions(t *testing.T) {
 					"onComplete":            `() => { window.ui.setBasePath('v3'); }`,
 					"defaultModelRendering": `"model"`,
 				},
+				DefaultModelsExpandDepth: HideModel,
+				ShowExtensions:           true,
 			},
 			exp: `window.onload = function() {
   const SomePlugin = (system) => ({
@@ -361,6 +454,7 @@ func TestUIConfigOptions(t *testing.T) {
     deepLinking:  false ,
     docExpansion: "none",
     dom_id: "#swagger-ui-id",
+    persistAuthorization:  true ,
     validatorUrl: null,
     presets: [
       SwaggerUIBundle.presets.apis,
@@ -374,7 +468,9 @@ func TestUIConfigOptions(t *testing.T) {
     defaultModelRendering: "model",
     onComplete: () => { window.ui.setBasePath('v3'); },
     showExtensions: true,
-    layout: "StandaloneLayout"
+    layout: "StandaloneLayout",
+    defaultModelsExpandDepth:  -1 ,
+    showExtensions:  true 
   })
 
   window.ui = ui
@@ -452,4 +548,31 @@ func TestUIConfigOptions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultModelsExpandDepth(t *testing.T) {
+	cfg := newConfig()
+	// Default value
+	assert.Equal(t, ShowModel, cfg.DefaultModelsExpandDepth)
+
+	// Set hide
+	DefaultModelsExpandDepth(HideModel)(cfg)
+	assert.Equal(t, HideModel, cfg.DefaultModelsExpandDepth)
+
+	// Set show
+	DefaultModelsExpandDepth(ShowModel)(cfg)
+	assert.Equal(t, ShowModel, cfg.DefaultModelsExpandDepth)
+}
+
+func TestShowExtensions(t *testing.T) {
+	var cfg *Config
+
+	cfg = newConfig()
+	assert.False(t, cfg.ShowExtensions)
+
+	cfg = newConfig(ShowExtensions(true))
+	assert.True(t, cfg.ShowExtensions)
+
+	cfg = newConfig(ShowExtensions(false))
+	assert.False(t, cfg.ShowExtensions)
 }

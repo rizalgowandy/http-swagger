@@ -3,60 +3,81 @@ package httpSwagger
 import (
 	"html/template"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
-	"sync"
 
-	swaggerFiles "github.com/swaggo/files"
+	swaggerFiles "github.com/swaggo/files/v2"
 	"github.com/swaggo/swag"
 )
 
-// WrapHandler wraps swaggerFiles.Handler and returns http.HandlerFunc
+// WrapHandler wraps swaggerFiles.Handler and returns http.HandlerFunc.
 var WrapHandler = Handler()
 
 // Config stores httpSwagger configuration variables.
 type Config struct {
 	// The url pointing to API definition (normally swagger.json or swagger.yaml). Default is `doc.json`.
-	URL          string
-	DeepLinking  bool
-	DocExpansion string
-	DomID        string
-	Plugins      []template.JS
-	UIConfig     map[template.JS]template.JS
-	BeforeScript template.JS
-	AfterScript  template.JS
+	URL                      string
+	DocExpansion             string
+	DomID                    string
+	InstanceName             string
+	BeforeScript             template.JS
+	AfterScript              template.JS
+	Plugins                  []template.JS
+	UIConfig                 map[template.JS]template.JS
+	DeepLinking              bool
+	PersistAuthorization     bool
+	Layout                   SwaggerLayout
+	DefaultModelsExpandDepth ModelsExpandDepthType
+	ShowExtensions           bool
 }
 
 // URL presents the url pointing to API definition (normally swagger.json or swagger.yaml).
-func URL(url string) func(c *Config) {
+func URL(url string) func(*Config) {
 	return func(c *Config) {
 		c.URL = url
 	}
 }
 
 // DeepLinking true, false.
-func DeepLinking(deepLinking bool) func(c *Config) {
+func DeepLinking(deepLinking bool) func(*Config) {
 	return func(c *Config) {
 		c.DeepLinking = deepLinking
 	}
 }
 
 // DocExpansion list, full, none.
-func DocExpansion(docExpansion string) func(c *Config) {
+func DocExpansion(docExpansion string) func(*Config) {
 	return func(c *Config) {
 		c.DocExpansion = docExpansion
 	}
 }
 
 // DomID #swagger-ui.
-func DomID(domID string) func(c *Config) {
+func DomID(domID string) func(*Config) {
 	return func(c *Config) {
 		c.DomID = domID
 	}
 }
 
+// InstanceName set the instance name that was used to generate the swagger documents
+// Defaults to swag.Name ("swagger").
+func InstanceName(name string) func(*Config) {
+	return func(c *Config) {
+		c.InstanceName = name
+	}
+}
+
+// PersistAuthorization Persist authorization information over browser close/refresh.
+// Defaults to false.
+func PersistAuthorization(persistAuthorization bool) func(*Config) {
+	return func(c *Config) {
+		c.PersistAuthorization = persistAuthorization
+	}
+}
+
 // Plugins specifies additional plugins to load into Swagger UI.
-func Plugins(plugins []string) func(c *Config) {
+func Plugins(plugins []string) func(*Config) {
 	return func(c *Config) {
 		vs := make([]template.JS, len(plugins))
 		for i, v := range plugins {
@@ -67,7 +88,7 @@ func Plugins(plugins []string) func(c *Config) {
 }
 
 // UIConfig specifies additional SwaggerUIBundle config object properties.
-func UIConfig(props map[string]string) func(c *Config) {
+func UIConfig(props map[string]string) func(*Config) {
 	return func(c *Config) {
 		vs := make(map[template.JS]template.JS, len(props))
 		for k, v := range props {
@@ -78,7 +99,7 @@ func UIConfig(props map[string]string) func(c *Config) {
 }
 
 // BeforeScript holds JavaScript to be run right before the Swagger UI object is created.
-func BeforeScript(js string) func(c *Config) {
+func BeforeScript(js string) func(*Config) {
 	return func(c *Config) {
 		c.BeforeScript = template.JS(js)
 	}
@@ -86,44 +107,98 @@ func BeforeScript(js string) func(c *Config) {
 
 // AfterScript holds JavaScript to be run right after the Swagger UI object is created
 // and set on the window.
-func AfterScript(js string) func(c *Config) {
+func AfterScript(js string) func(*Config) {
 	return func(c *Config) {
 		c.AfterScript = template.JS(js)
 	}
 }
 
+type SwaggerLayout string
+
+const (
+	BaseLayout       SwaggerLayout = "BaseLayout"
+	StandaloneLayout SwaggerLayout = "StandaloneLayout"
+)
+
+// Define Layout options are BaseLayout or StandaloneLayout
+func Layout(layout SwaggerLayout) func(*Config) {
+	return func(c *Config) {
+		c.Layout = layout
+	}
+}
+
+type ModelsExpandDepthType int
+
+const (
+	ShowModel ModelsExpandDepthType = 1
+	HideModel ModelsExpandDepthType = -1
+)
+
+// DefaultModelsExpandDepth presents the model of response and request.
+// set the default expansion depth for models
+func DefaultModelsExpandDepth(defaultModelsExpandDepth ModelsExpandDepthType) func(*Config) {
+	return func(c *Config) {
+		c.DefaultModelsExpandDepth = defaultModelsExpandDepth
+	}
+}
+
+// ShowExtensions controls the display of vendor extension (x-) fields and values for Operations,
+// Parameters, Responses, and Schema.
+func ShowExtensions(showExtensions bool) func(config *Config) {
+	return func(c *Config) {
+		c.ShowExtensions = showExtensions
+	}
+}
+
+func newConfig(configFns ...func(*Config)) *Config {
+	config := Config{
+		URL:                      "doc.json",
+		DocExpansion:             "list",
+		DomID:                    "swagger-ui",
+		InstanceName:             "swagger",
+		DeepLinking:              true,
+		PersistAuthorization:     false,
+		Layout:                   StandaloneLayout,
+		DefaultModelsExpandDepth: ShowModel,
+		ShowExtensions:           false,
+	}
+
+	for _, fn := range configFns {
+		fn(&config)
+	}
+
+	if config.InstanceName == "" {
+		config.InstanceName = swag.Name
+	}
+
+	return &config
+}
+
 // Handler wraps `http.Handler` into `http.HandlerFunc`.
 func Handler(configFns ...func(*Config)) http.HandlerFunc {
-	var once sync.Once
 
-	config := &Config{
-		URL:          "doc.json",
-		DeepLinking:  true,
-		DocExpansion: "list",
-		DomID:        "#swagger-ui",
-	}
-	for _, configFn := range configFns {
-		configFn(config)
-	}
+	config := newConfig(configFns...)
 
 	// create a template with name
-	t := template.New("swagger_index.html")
-	index, _ := t.Parse(indexTempl)
+	index, _ := template.New("swagger_index.html").Parse(indexTempl)
 
-	var re = regexp.MustCompile(`^(.*/)([^?].*)?[?|.]*$`)
+	re := regexp.MustCompile(`^(.*/)([^?].*)?[?|.]*$`)
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		matches := re.FindStringSubmatch(r.RequestURI)
-		path := matches[2]
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 
-		h := swaggerFiles.Handler
-		once.Do(func() {
-			h.Prefix = matches[1]
-		})
+			return
+		}
+
+		matches := re.FindStringSubmatch(r.RequestURI)
+
+		path := matches[2]
 
 		switch filepath.Ext(path) {
 		case ".html":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
 		case ".css":
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 		case ".js":
@@ -138,17 +213,25 @@ func Handler(configFns ...func(*Config)) http.HandlerFunc {
 		case "index.html":
 			_ = index.Execute(w, config)
 		case "doc.json":
-			doc, err := swag.ReadDoc()
+			doc, err := swag.ReadDoc(config.InstanceName)
 			if err != nil {
 				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 
 				return
 			}
+
 			_, _ = w.Write([]byte(doc))
 		case "":
-			http.Redirect(w, r, h.Prefix+"index.html", 301)
+			http.Redirect(w, r, matches[1]+"/"+"index.html", http.StatusMovedPermanently)
 		default:
-			h.ServeHTTP(w, r)
+			var err error
+			r.URL, err = url.Parse(matches[2])
+			if err != nil {
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+
+				return
+			}
+			http.FileServer(http.FS(swaggerFiles.FS)).ServeHTTP(w, r)
 		}
 	}
 }
@@ -159,7 +242,6 @@ const indexTempl = `<!-- HTML for static distribution bundle build -->
 <head>
   <meta charset="UTF-8">
   <title>Swagger UI</title>
-  <link href="https://fonts.googleapis.com/css?family=Open+Sans:400,700|Source+Code+Pro:300,600|Titillium+Web:400,600,700" rel="stylesheet">
   <link rel="stylesheet" type="text/css" href="./swagger-ui.css" >
   <link rel="icon" type="image/png" href="./favicon-32x32.png" sizes="32x32" />
   <link rel="icon" type="image/png" href="./favicon-16x16.png" sizes="16x16" />
@@ -232,7 +314,8 @@ window.onload = function() {
     url: "{{.URL}}",
     deepLinking: {{.DeepLinking}},
     docExpansion: "{{.DocExpansion}}",
-    dom_id: "{{.DomID}}",
+    dom_id: "#{{.DomID}}",
+    persistAuthorization: {{.PersistAuthorization}},
     validatorUrl: null,
     presets: [
       SwaggerUIBundle.presets.apis,
@@ -247,7 +330,9 @@ window.onload = function() {
     {{- range $k, $v := .UIConfig}}
     {{$k}}: {{$v}},
     {{- end}}
-    layout: "StandaloneLayout"
+    layout: "{{$.Layout}}",
+    defaultModelsExpandDepth: {{.DefaultModelsExpandDepth}},
+    showExtensions: {{.ShowExtensions}}
   })
 
   window.ui = ui
